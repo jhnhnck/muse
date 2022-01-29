@@ -35,7 +35,7 @@ export default class implements Command {
       return;
     }
 
-    if (msg.author.id !== msg.guild!.owner!.id) {
+    if (msg.author.id !== process.env.OWNER_ID) {
       await msg.channel.send(errorMsg('not authorized'));
       return;
     }
