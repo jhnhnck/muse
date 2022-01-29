@@ -1,8 +1,8 @@
-import {TextChannel, Message, GuildChannel} from 'discord.js';
+import {TextChannel, Message, GuildChannel, ThreadChannel} from 'discord.js';
 import {injectable} from 'inversify';
-import {Settings} from '../models/index.js';
 import errorMsg from '../utils/error-msg.js';
 import Command from '.';
+import {prisma} from '../utils/db.js';
 
 @injectable()
 export default class implements Command {
@@ -11,16 +11,23 @@ export default class implements Command {
   public examples = [
     ['config prefix !', 'set the prefix to !'],
     ['config channel music-commands', 'bind the bot to the music-commands channel'],
+    ['config playlist-limit 30', 'set the playlist song limit to 30'],
   ];
 
   public async execute(msg: Message, args: string []): Promise<void> {
     if (args.length === 0) {
       // Show current settings
-      const settings = await Settings.findByPk(msg.guild!.id);
+      const settings = await prisma.setting.findUnique({
+        where: {
+          guildId: msg.guild!.id,
+        },
+      });
 
-      if (settings) {
+      if (settings?.channel) {
         let response = `prefix: \`${settings.prefix}\`\n`;
-        response += `channel: ${msg.guild!.channels.cache.get(settings.channel)!.toString()}`;
+        // eslint-disable-next-line @typescript-eslint/no-base-to-string
+        response += `channel: ${msg.guild!.channels.cache.get(settings.channel)!.toString()}\n`;
+        response += `playlist-limit: ${settings.playlistLimit}`;
 
         await msg.channel.send(response);
       }
@@ -44,14 +51,21 @@ export default class implements Command {
       case 'prefix': {
         const newPrefix = args[1];
 
-        await Settings.update({prefix: newPrefix}, {where: {guildId: msg.guild!.id}});
+        await prisma.setting.update({
+          where: {
+            guildId: msg.guild!.id,
+          },
+          data: {
+            prefix: newPrefix,
+          },
+        });
 
         await msg.channel.send(`👍 prefix updated to \`${newPrefix}\``);
         break;
       }
 
       case 'channel': {
-        let channel: GuildChannel | undefined;
+        let channel: GuildChannel | ThreadChannel | undefined;
 
         if (args[1].includes('<#') && args[1].includes('>')) {
           channel = msg.guild!.channels.cache.find(c => c.id === args[1].slice(2, args[1].indexOf('>')));
@@ -59,8 +73,15 @@ export default class implements Command {
           channel = msg.guild!.channels.cache.find(c => c.name === args[1]);
         }
 
-        if (channel && channel.type === 'text') {
-          await Settings.update({channel: channel.id}, {where: {guildId: msg.guild!.id}});
+        if (channel && channel.type === 'GUILD_TEXT') {
+          await prisma.setting.update({
+            where: {
+              guildId: msg.guild!.id,
+            },
+            data: {
+              channel: channel.id,
+            },
+          });
 
           await Promise.all([
             (channel as TextChannel).send('hey apparently I\'m bound to this channel now'),
@@ -70,6 +91,26 @@ export default class implements Command {
           await msg.channel.send(errorMsg('either that channel doesn\'t exist or you want me to become sentient and listen to a voice channel'));
         }
 
+        break;
+      }
+
+      case 'playlist-limit': {
+        const playlistLimit = parseInt(args[1], 10);
+        if (playlistLimit <= 0) {
+          await msg.channel.send(errorMsg('please enter a valid number'));
+          return;
+        }
+
+        await prisma.setting.update({
+          where: {
+            guildId: msg.guild!.id,
+          },
+          data: {
+            playlistLimit,
+          },
+        });
+
+        await msg.channel.send(`👍 playlist-limit updated to ${playlistLimit}`);
         break;
       }
 

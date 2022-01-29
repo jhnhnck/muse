@@ -14,9 +14,9 @@ import {TYPES} from '../types.js';
 import {cleanUrl} from '../utils/url.js';
 import ThirdParty from './third-party.js';
 import Config from './config.js';
-import CacheProvider from './cache.js';
+import KeyValueCacheProvider from './key-value-cache.js';
 
-type QueuedSongWithoutChannel = Except<QueuedSong, 'addedInChannelId'>;
+type SongMetadata = Except<QueuedSong, 'addedInChannelId' | 'requestedBy'>;
 
 const ONE_HOUR_IN_SECONDS = 60 * 60;
 const ONE_MINUTE_IN_SECONDS = 1 * 60;
@@ -26,14 +26,14 @@ export default class {
   private readonly youtube: YouTube;
   private readonly youtubeKey: string;
   private readonly spotify: Spotify;
-  private readonly cache: CacheProvider;
+  private readonly cache: KeyValueCacheProvider;
 
   private readonly ytsrQueue: PQueue;
 
   constructor(
   @inject(TYPES.ThirdParty) thirdParty: ThirdParty,
     @inject(TYPES.Config) config: Config,
-    @inject(TYPES.Cache) cache: CacheProvider) {
+    @inject(TYPES.KeyValueCache) cache: KeyValueCacheProvider) {
     this.youtube = thirdParty.youtube;
     this.youtubeKey = config.YOUTUBE_API_KEY;
     this.spotify = thirdParty.spotify;
@@ -42,62 +42,55 @@ export default class {
     this.ytsrQueue = new PQueue({concurrency: 4});
   }
 
-  async youtubeVideoSearch(query: string): Promise<QueuedSongWithoutChannel | null> {
-    try {
-      const {items} = await this.ytsrQueue.add(async () => this.cache.wrap(
-        ytsr,
-        query,
-        {
-          limit: 10,
-        },
-        {
-          expiresIn: ONE_HOUR_IN_SECONDS,
-        },
-      ));
+  async youtubeVideoSearch(query: string): Promise<SongMetadata> {
+    const {items} = await this.ytsrQueue.add(async () => this.cache.wrap(
+      ytsr,
+      query,
+      {
+        limit: 10,
+      },
+      {
+        expiresIn: ONE_HOUR_IN_SECONDS,
+      },
+    ));
 
-      let firstVideo: Video | undefined;
+    let firstVideo: Video | undefined;
 
-      for (const item of items) {
-        if (item.type === 'video') {
-          firstVideo = item;
-          break;
-        }
+    for (const item of items) {
+      if (item.type === 'video') {
+        firstVideo = item;
+        break;
       }
-
-      if (!firstVideo) {
-        throw new Error('No video found.');
-      }
-
-      return await this.youtubeVideo(firstVideo.id);
-    } catch (_: unknown) {
-      return null;
     }
+
+    if (!firstVideo) {
+      throw new Error('No video found.');
+    }
+
+    return this.youtubeVideo(firstVideo.id);
   }
 
-  async youtubeVideo(url: string): Promise<QueuedSongWithoutChannel | null> {
-    try {
-      const videoDetails = await this.cache.wrap(
-        this.youtube.videos.get,
-        cleanUrl(url),
-        {
-          expiresIn: ONE_HOUR_IN_SECONDS,
-        },
-      );
+  async youtubeVideo(url: string): Promise<SongMetadata> {
+    const videoDetails = await this.cache.wrap(
+      this.youtube.videos.get,
+      cleanUrl(url),
+      {
+        expiresIn: ONE_HOUR_IN_SECONDS,
+      },
+    );
 
-      return {
-        title: videoDetails.snippet.title,
-        artist: videoDetails.snippet.channelTitle,
-        length: toSeconds(parse(videoDetails.contentDetails.duration)),
-        url: videoDetails.id,
-        playlist: null,
-        isLive: videoDetails.snippet.liveBroadcastContent === 'live',
-      };
-    } catch (_: unknown) {
-      return null;
-    }
+    return {
+      title: videoDetails.snippet.title,
+      artist: videoDetails.snippet.channelTitle,
+      length: toSeconds(parse(videoDetails.contentDetails.duration)),
+      url: videoDetails.id,
+      playlist: null,
+      isLive: videoDetails.snippet.liveBroadcastContent === 'live',
+      thumbnailUrl: videoDetails.snippet.thumbnails.medium.url,
+    };
   }
 
-  async youtubePlaylist(listId: string): Promise<QueuedSongWithoutChannel[]> {
+  async youtubePlaylist(listId: string): Promise<SongMetadata[]> {
     // YouTube playlist
     const playlist = await this.cache.wrap(
       this.youtube.playlists.get,
@@ -166,7 +159,7 @@ export default class {
 
     const queuedPlaylist = {title: playlist.snippet.title, source: playlist.id};
 
-    const songsToReturn: QueuedSongWithoutChannel[] = [];
+    const songsToReturn: SongMetadata[] = [];
 
     for (const video of playlistVideos) {
       try {
@@ -179,6 +172,7 @@ export default class {
           url: video.contentDetails.videoId,
           playlist: queuedPlaylist,
           isLive: false,
+          thumbnailUrl: video.snippet.thumbnails.medium.url,
         });
       } catch (_: unknown) {
         // Private and deleted videos are sometimes in playlists, duration of these is not returned and they should not be added to the queue.
@@ -188,7 +182,7 @@ export default class {
     return songsToReturn;
   }
 
-  async spotifySource(url: string): Promise<[QueuedSongWithoutChannel[], number, number]> {
+  async spotifySource(url: string, playlistLimit: number): Promise<[SongMetadata[], number, number]> {
     const parsed = spotifyURI.parse(url);
 
     let tracks: SpotifyApi.TrackObjectSimplified[] = [];
@@ -252,23 +246,26 @@ export default class {
       }
     }
 
-    // Get 50 random songs if many
+    // Get random songs if the playlist is larger than limit
     const originalNSongs = tracks.length;
 
-    if (tracks.length > 50) {
+    if (tracks.length > playlistLimit) {
       const shuffled = shuffle(tracks);
 
-      tracks = shuffled.slice(0, 50);
+      tracks = shuffled.slice(0, playlistLimit);
     }
 
-    let songs = await Promise.all(tracks.map(async track => this.spotifyToYouTube(track, playlist)));
+    const searchResults = await Promise.allSettled(tracks.map(async track => this.spotifyToYouTube(track)));
 
     let nSongsNotFound = 0;
 
-    // Get rid of null values
-    songs = songs.reduce((accum: QueuedSongWithoutChannel[], song) => {
-      if (song) {
-        accum.push(song);
+    // Count songs that couldn't be found
+    const songs: SongMetadata[] = searchResults.reduce((accum: SongMetadata[], result) => {
+      if (result.status === 'fulfilled') {
+        accum.push({
+          ...result.value,
+          ...(playlist ? {playlist} : {}),
+        });
       } else {
         nSongsNotFound++;
       }
@@ -276,14 +273,10 @@ export default class {
       return accum;
     }, []);
 
-    return [songs as QueuedSongWithoutChannel[], nSongsNotFound, originalNSongs];
+    return [songs, nSongsNotFound, originalNSongs];
   }
 
-  private async spotifyToYouTube(track: SpotifyApi.TrackObjectSimplified, _: QueuedPlaylist | null): Promise<QueuedSongWithoutChannel | null> {
-    try {
-      return await this.youtubeVideoSearch(`"${track.name}" "${track.artists[0].name}"`);
-    } catch (_: unknown) {
-      return null;
-    }
+  private async spotifyToYouTube(track: SpotifyApi.TrackObjectSimplified): Promise<SongMetadata> {
+    return this.youtubeVideoSearch(`"${track.name}" "${track.artists[0].name}"`);
   }
 }

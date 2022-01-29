@@ -1,9 +1,9 @@
-import {Message} from 'discord.js';
+import {Message, Util} from 'discord.js';
 import {injectable} from 'inversify';
 import Command from '.';
 import {TYPES} from '../types.js';
-import {Settings} from '../models/index.js';
 import container from '../inversify.config.js';
+import {prisma} from '../utils/db.js';
 
 @injectable()
 export default class implements Command {
@@ -21,7 +21,11 @@ export default class implements Command {
       this.commands = container.getAll<Command>(TYPES.Command);
     }
 
-    const settings = await Settings.findOne({where: {guildId: msg.guild!.id}});
+    const settings = await prisma.setting.findUnique({
+      where: {
+        guildId: msg.guild!.id,
+      },
+    });
 
     if (!settings) {
       return;
@@ -29,7 +33,7 @@ export default class implements Command {
 
     const {prefix} = settings;
 
-    const res = this.commands.sort((a, b) => a.name.localeCompare(b.name)).reduce((content, command) => {
+    const res = Util.splitMessage(this.commands.sort((a, b) => a.name.localeCompare(b.name)).reduce((content, command) => {
       const aliases = command.aliases.reduce((str, alias, i) => {
         str += alias;
 
@@ -53,9 +57,13 @@ export default class implements Command {
       content += '\n';
 
       return content;
-    }, '');
+    }, ''));
 
-    await msg.author.send(res, {split: true});
+    for (const r of res) {
+      // eslint-disable-next-line no-await-in-loop
+      await msg.author.send(r);
+    }
+
     await msg.react('🇩');
     await msg.react('🇲');
   }

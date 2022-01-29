@@ -1,5 +1,5 @@
 import {injectable} from 'inversify';
-import {Cache} from '../models/index.js';
+import {prisma} from '../utils/db.js';
 import debug from '../utils/debug.js';
 
 type Seconds = number;
@@ -12,7 +12,7 @@ type Options = {
 const futureTimeToDate = (time: Seconds) => new Date(new Date().getTime() + (time * 1000));
 
 @injectable()
-export default class CacheProvider {
+export default class KeyValueCacheProvider {
   async wrap<T extends [...any[], Options], F>(func: (...options: any) => Promise<F>, ...options: T): Promise<F> {
     if (options.length === 0) {
       throw new Error('Missing cache options');
@@ -29,7 +29,11 @@ export default class CacheProvider {
       throw new Error(`Cache key ${key} is too short.`);
     }
 
-    const cachedResult = await Cache.findByPk(key);
+    const cachedResult = await prisma.keyValueCache.findUnique({
+      where: {
+        key,
+      },
+    });
 
     if (cachedResult) {
       if (new Date() < cachedResult.expiresAt) {
@@ -37,7 +41,11 @@ export default class CacheProvider {
         return JSON.parse(cachedResult.value) as F;
       }
 
-      await cachedResult.destroy();
+      await prisma.keyValueCache.delete({
+        where: {
+          key,
+        },
+      });
     }
 
     debug(`Cache miss: ${key}`);
@@ -45,10 +53,21 @@ export default class CacheProvider {
     const result = await func(...options as any[]);
 
     // Save result
-    await Cache.upsert({
-      key,
-      value: JSON.stringify(result),
-      expiresAt: futureTimeToDate(expiresIn),
+    const value = JSON.stringify(result);
+    const expiresAt = futureTimeToDate(expiresIn);
+    await prisma.keyValueCache.upsert({
+      where: {
+        key,
+      },
+      update: {
+        value,
+        expiresAt,
+      },
+      create: {
+        key,
+        value,
+        expiresAt,
+      },
     });
 
     return result;

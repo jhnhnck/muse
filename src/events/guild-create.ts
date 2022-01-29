@@ -1,17 +1,28 @@
 import {Guild, TextChannel, Message, MessageReaction, User} from 'discord.js';
 import emoji from 'node-emoji';
 import pEvent from 'p-event';
-import {Settings} from '../models/index.js';
 import {chunk} from '../utils/arrays.js';
+import {prisma} from '../utils/db.js';
 
 const DEFAULT_PREFIX = '!';
 
 export default async (guild: Guild): Promise<void> => {
-  await Settings.upsert({guildId: guild.id, prefix: DEFAULT_PREFIX});
+  await prisma.setting.upsert({
+    where: {
+      guildId: guild.id,
+    },
+    create: {
+      guildId: guild.id,
+      prefix: DEFAULT_PREFIX,
+    },
+    update: {
+      prefix: DEFAULT_PREFIX,
+    },
+  });
 
   const owner = await guild.client.users.fetch(process.env.OWNER_ID as string);
 
-  let firstStep = '👋 Hi, John!\n';
+  let firstStep = `👋 Hi!\n`;
   firstStep += 'I just need to ask a few questions before you start listening to music.\n\n';
   firstStep += 'First, what channel should I listen to for music commands?\n\n';
 
@@ -27,7 +38,7 @@ export default async (guild: Guild): Promise<void> => {
   const emojiChannels: EmojiChannel[] = [];
 
   for (const [channelId, channel] of guild.channels.cache) {
-    if (channel.type === 'text') {
+    if (channel.type === 'GUILD_TEXT') {
       emojiChannels.push({
         name: channel.name,
         id: channelId,
@@ -65,12 +76,20 @@ export default async (guild: Guild): Promise<void> => {
 
   await owner.send(secondStep);
 
-  const prefixResponses = await firstStepMsg.channel.awaitMessages((r: Message) => r.content.length === 1, {max: 1});
+  const prefixResponses = await firstStepMsg.channel.awaitMessages({filter: (r: Message) => r.content.length === 1, max: 1});
 
   const prefixCharacter = prefixResponses.first()!.content;
 
   // Save settings
-  await Settings.update({prefix: prefixCharacter, channel: chosenChannel.id}, {where: {guildId: guild.id}});
+  await prisma.setting.update({
+    where: {
+      guildId: guild.id,
+    },
+    data: {
+      channel: chosenChannel.id,
+      prefix: prefixCharacter,
+    },
+  });
 
   // Send welcome
   const boundChannel = guild.client.channels.cache.get(chosenChannel.id) as TextChannel;
