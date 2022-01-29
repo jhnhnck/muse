@@ -18,7 +18,7 @@ Muse is a **highly-opinionated midwestern self-hosted** Discord music bot **that
 
 ### Design Philosophy
 
-I believe it makes much more sense to let Discord handle user permissions (whenever possible) rather than building them into a bot and adding additional complexity. Instead of only allowing users with a certain role to control Muse, Muse allows anyone who has access to its bound channel to control it. Instead of specifying the owner as a user ID in the config, Muse simply looks at the guild owner.
+I believe it makes much more sense to let Discord handle user permissions (whenever possible) rather than building them into a bot and adding additional complexity. Instead of only allowing users with a certain role to control Muse, Muse allows anyone who has access to its bound channel to control it. ~~Instead of specifying the owner as a user ID in the config, Muse simply looks at the guild owner.~~ Nah, that's stupid. It's a config option now.
 
 ### Running
 
